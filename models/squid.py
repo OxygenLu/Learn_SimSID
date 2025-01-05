@@ -8,45 +8,51 @@ import torch.nn as nn
 from models import basic_modules
 from models.basic_modules import make_window, window_reverse
 from models.memory import MemoryMatrixBlock, \
-                   MemoryMatrixBlockV2, \
-                   MemoryMatrixBlockV3, \
-                   MemoryMatrixBlockV4
+                          MemoryMatrixBlockV2, \
+                          MemoryMatrixBlockV3, \
+                          MemoryMatrixBlockV4
 from models.inpaint import InpaintBlock
+import importlib
 
 
 class AE(nn.Module):
     def __init__(self, config, features_root, level=4):
         super(AE, self).__init__()
         self.config = config
-        self.num_in_ch = config.num_in_ch
-        self.initial_combine = config.initial_combine
+        self.num_in_ch = config.num_in_ch# 1
+        self.initial_combine = config.initial_combine#2
         self.level = config.level
         self.num_patch = config.num_patch
         print('SQUID ops:', config.ops)
 
         assert len(config.ops) == config.level
-
-        self.filter_list = [features_root, features_root*2, features_root*4, features_root*8, features_root*16, features_root*16]
-
-        self.in_conv = basic_modules.inconv(config.num_in_ch, features_root)
+        # features_root= 32, 64, 128; 256, 512, 512
+        self.filter_list = [features_root, features_root*2, features_root*4, 
+                            features_root*8, features_root*16, features_root*16]
         
+        # 改变num_ch, (conv => BN => ReLU) * 2
+        self.in_conv = basic_modules.inconv(config.num_in_ch, features_root)#num_in_ch=1
+        #上、下采样块
         self.down_blocks = nn.ModuleList()
         self.up_blocks = nn.ModuleList()
 
-        for i in range(level):
+        # input=32*128*128 -> 64*64*64; 32; 16; 8
+        for i in range(level):# level=4, 
             self.down_blocks.append(basic_modules.down(self.filter_list[i], self.filter_list[i+1], use_se=False))
-            if config.ops[i] == 'concat':
+
+            if config.ops[i] == 'concat': # ['concat', 'concat', 'none', 'none']
                 filter = self.filter_list[level-i] + self.filter_list[level-i-1]#//2
             else:
                 filter = self.filter_list[level-i]
+
             self.up_blocks.append(basic_modules.up(filter, self.filter_list[level-1-i], op=config.ops[i], use_se=False))
 
-        self.inpaint_block = InpaintBlock(
-            config.inpaint_config,
-            self.filter_list[level],
-            num_memory=self.num_patch**2,
-        )
-
+        # Inpaint模块
+        self.inpaint_block = InpaintBlock(config.inpaint_config, 
+                                          self.filter_list[level], 
+                                          num_memory=self.num_patch**2,
+                                          )# 512, num_memory=4
+        #（128//2）//2**4=4
         last_resolution = (config.img_size // config.num_patch) // (2 ** level)
         # self.memory_blocks = nn.ModuleList([
         #     nn.Identity(),
@@ -54,15 +60,17 @@ class AE(nn.Module):
         #     MemoryMatrixBlock(config.memory_config, self.filter_list[level-2] * 4 * last_resolution ** 2) if config.ops[1] != 'none' else nn.Identity(),
         #     MemoryMatrixBlock(config.memory_config, self.filter_list[level-1] * last_resolution ** 2) if config.ops[0] != 'none' else nn.Identity(),
         # ])
+
         self.memory_blocks = nn.ModuleList()
-        for i, mem_type in enumerate(config.decoder_memory):
+        for i, mem_type in enumerate(config.decoder_memory):#['V1', 'V1', 'none', 'none']->4
             if mem_type == 'none':
-                self.memory_blocks.append(nn.Identity())
+                self.memory_blocks.append(nn.Identity())#nn.Identity()占位
             elif mem_type == 'V1':
                 self.memory_blocks.append(
                     MemoryMatrixBlock(
-                        config.memory_config,
-                        self.filter_list[level-1-i] * (last_resolution * (2 ** (i + 1)) // int(math.sqrt(config.memory_config.num_memory))) ** 2
+                        config.memory_config, #features_root= 32, 64, 128; 256, 512, 512
+                        self.filter_list[level-1-i] * (last_resolution * (2 ** (i + 1)) // \
+                                                       int(math.sqrt(config.memory_config.num_memory))) ** 2
                     )
                 )
             elif mem_type == 'V3':
@@ -75,6 +83,7 @@ class AE(nn.Module):
                 )
 
         self.out_conv = basic_modules.outconv(features_root, config.num_in_ch)
+
         if config.normalize_tanh:    # input is normalized to [-1, 1]
             self.out_nonlinear = nn.Tanh()
         else:
@@ -90,7 +99,8 @@ class AE(nn.Module):
                     filter = self.filter_list[level-i] + self.filter_list[level-i-1]
                 else:
                     filter = self.filter_list[level-i]
-                self.teacher_ups.append(basic_modules.up(filter, self.filter_list[level-1-i], op=config.ops[i], use_se=False))
+                self.teacher_ups.append(basic_modules.up(filter, self.filter_list[level-1-i], 
+                                                         op=config.ops[i], use_se=False))
             self.teacher_out = basic_modules.outconv(features_root, config.num_in_ch)
 
     def forward(self, x, fadein_weights=[1.0, 1.0, 1.0, 1.0]):
@@ -111,9 +121,10 @@ class AE(nn.Module):
         skips = []
         embeddings = list()
         # encoding
-        for i in range(self.level):
+        for i in range(self.level):#4
             B_, c, w, h = x.size()
-            if i < self.initial_combine:
+            if i < self.initial_combine:#2
+                # 图片还原 B,3,128,128
                 sc = window_reverse(x, w, h * self.num_patch, w * self.num_patch)
                 skips.append(sc * fadein_weights[i])
             else:
@@ -129,8 +140,9 @@ class AE(nn.Module):
         
         t_x = x.clone()
         if self.config.teacher_stop_gradient:
-            t_x = t_x.detach()
-
+            t_x = t_x.detach()#关闭教师网络梯度
+        
+        # in-painting
         if self.config.use_memory_inpaint_block:
             x, alpha = self.inpaint_block(x, bs, num_windows, add_condition=True)
             embedding = window_reverse(x, w, h * self.num_patch, w * self.num_patch)
@@ -141,7 +153,7 @@ class AE(nn.Module):
         self_dist_loss = []
         # decoding
         for i in range(self.level):
-            # combine patches?
+            # combine patches
             if self.initial_combine is not None and self.initial_combine == (self.level - i):
                 B_, c, h, w = x.shape
                 x = window_reverse(x, w, h * self.num_patch, w * self.num_patch)
@@ -164,7 +176,7 @@ class AE(nn.Module):
             if self.dist:
                 t_x = self.teacher_ups[i](t_x, skips[-1-i].detach().clone())
                 # do we need sg here? maybe not
-                self_dist_loss.append(self.mse_loss(x, t_x))
+                self_dist_loss.append(self.mse_loss(x, t_x))#loss
 
         decode_time = time.time()
 
@@ -172,7 +184,7 @@ class AE(nn.Module):
         if self.dist:
             self_dist_loss = torch.sum(torch.stack(self_dist_loss))
             t_x = self.teacher_out(t_x)
-            t_x = self.out_nonlinear(t_x)
+            t_x = self.out_nonlinear(t_x)# activate
             B_, c, w, h = t_x.shape
             if self.initial_combine is None:
                 t_x = window_reverse(t_x, w, w * self.num_patch, w * self.num_patch)
@@ -194,9 +206,17 @@ class AE(nn.Module):
             x = make_window(x, W//self.num_patch, H//self.num_patch, 0)
 
         outs = dict(recon=whole_recon, embeddings=embeddings)
-        if self.dist:
+
+        if self.dist:#true
             outs['teacher_recon'] = t_x
             outs['dist_loss'] = self_dist_loss
         if self.config.analyze_memory:
             outs['alpha'] = alpha
         return outs
+
+if __name__ == '__main__':
+    x = torch.randn(1, 3, 128, 128)
+    CONFIG = importlib.import_module('/home/data3t/luxijun/document/SimSID/configs/zhang_dev.py').Config()
+    model = AE(CONFIG, 32, level=4).cuda()
+    out =  model(x)
+

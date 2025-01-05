@@ -14,20 +14,23 @@ class InpaintBlock(nn.Module):
         self.config = config
         self.num_in_ch = num_in_ch
         self.num_memory = num_memory
-        self.mask_ratio = config.mask_ratio
+        self.mask_ratio = config.mask_ratio # 1
         print('Masked Shortcut activated with mask ratio:', self.mask_ratio)
-        memory_channel = config.memory_channel
+        memory_channel = config.memory_channel # 128 * 4 * 4
 
         self.bottleneck_conv1 = nn.Sequential(
             nn.Conv2d(num_in_ch, num_in_ch // 4, 1, 1, 0, bias=False),
             nn.BatchNorm2d(num_in_ch // 4),
-            nn.ReLU(),
+            nn.ReLU()
         )
 
         self.memory = nn.ModuleList()
+
         if config.use_memory_queue:
-            for _ in range(num_memory):
-                self.memory.append(memory.MemoryQueue(config.num_slots, memory_channel, shrink_thres=config.shrink_thres))
+            for _ in range(num_memory):#num_memory=4
+                #num_slots=200, memory_channel=128*4*4, shrink_thres=5
+                self.memory.append(memory.MemoryQueue(config.num_slots, memory_channel, 
+                                                      shrink_thres=config.shrink_thres))
         else:
             for _ in range(num_memory):
                 self.memory.append(memory.Memory(config.num_slots, memory_channel, config.shrink_thres))
@@ -36,7 +39,7 @@ class InpaintBlock(nn.Module):
         self.attn_norm1 = nn.LayerNorm(memory_channel)
 
         self.ff = nn.Sequential(
-            nn.Linear(memory_channel, memory_channel // 4),
+            nn.Linear(memory_channel, memory_channel // 4), 
             nn.Dropout(config.drop),
             nn.ReLU(),
             nn.Linear(memory_channel // 4, memory_channel),

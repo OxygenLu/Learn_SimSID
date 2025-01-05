@@ -22,9 +22,11 @@ from tools import parse_args, build_disc, log, log_loss, save_image, backup_file
 from alert import GanAlert
 
 
+
 args = parse_args()
 
 CONFIG = importlib.import_module('configs.'+args.config).Config()
+
 
 if not os.path.exists(os.path.join('checkpoints', args.exp)):
     os.makedirs(os.path.join('checkpoints', args.exp), exist_ok=True)
@@ -43,13 +45,15 @@ backup_files(args)
 
 # main AE
 model = squid.AE(CONFIG, 32, level=CONFIG.level).cuda()
-opt = CONFIG.opt(model.parameters(), lr=CONFIG.lr, eps=1e-7, betas=(0.5, 0.999), weight_decay=0.00001)
+opt = CONFIG.opt(model.parameters(), lr=CONFIG.lr, eps=1e-7, 
+                 betas=(0.5, 0.999), weight_decay=0.00001)
 scheduler = CONFIG.scheduler(opt, **CONFIG.scheduler_args)
 
 # for discriminator
 if (CONFIG.enbale_gan is not None and CONFIG.enbale_gan >= 0):
     discriminator = build_disc(CONFIG).cuda()
-    opt_d = CONFIG.opt(discriminator.parameters(), betas=(0.5, 0.999), lr=CONFIG.gan_lr)
+    opt_d = CONFIG.opt(discriminator.parameters(), 
+                       betas=(0.5, 0.999), lr=CONFIG.gan_lr)# Adam
     # scheduler_d = CONFIG.scheduler_d(opt_d, **CONFIG.scheduler_args_d)
 
 # criterions
@@ -64,12 +68,13 @@ def main():
 
     best_auc = -1
     best_epoch = 0
-
+    
+    #train 2000
     for epoch in range(1, CONFIG.epochs + 1):
         start_time = time.time()
-        # when GAN training is disabled
-        if CONFIG.enbale_gan is None or epoch < CONFIG.enbale_gan:
-            train_loss = train(CONFIG.train_loader, epoch)
+        # when GAN training is disabled 
+        if CONFIG.enbale_gan is None or epoch < CONFIG.enbale_gan: # enbale_gan=0
+            train_loss = train(CONFIG.train_loader, epoch)# train函数计算loss
             val_loss = {'recon_l1': 0.}
             log_loss(log_file, epoch, train_loss, val_loss)
             continue
@@ -141,7 +146,7 @@ def main():
     log_file.close()
     writer.close()
 
-
+# 方法一
 def train(dataloader, epoch):
     model.train()
     batches_done = 0
@@ -149,7 +154,7 @@ def train(dataloader, epoch):
 
     # clip dataloader
     if CONFIG.limit is None:
-        limit = len(dataloader) - len(dataloader) % CONFIG.n_critic
+        limit = len(dataloader) - len(dataloader) % CONFIG.n_critic #n_critic:2
     else:
         limit = CONFIG.limit
 
@@ -160,11 +165,12 @@ def train(dataloader, epoch):
 
         img = img.to(CONFIG.device)
         label = label.to(CONFIG.device)
-
+        
+        #使用Adam
         opt.zero_grad()
 
         out = model(img)
-
+        
         if CONFIG.alert is not None:
             CONFIG.alert.record(out['recon'].detach(), img)
 
@@ -181,9 +187,10 @@ def train(dataloader, epoch):
             loss_all = loss_all + dist_loss
             tot_loss['dist_loss'] += dist_loss.item()
 
-        loss_all.backward()
-        opt.step()
+        loss_all.backward()# 反向传播
+        opt.step()# 更新
 
+        # 空间记忆矩阵
         for module in model.modules():
             if isinstance(module, MemoryQueue):
                 module.update()
@@ -194,37 +201,45 @@ def train(dataloader, epoch):
 
     return tot_loss
 
+#方法二
 def gan_train(dataloader, epoch, writer):
     model.train()
     batches_done = 0
-    tot_loss = {'loss': 0., 'recon_loss': 0., 'g_loss': 0., 'd_loss': 0., 't_recon_loss': 0., 'dist_loss': 0.}
+    tot_loss = {'loss': 0., 'recon_loss': 0., 'g_loss': 0., 
+                'd_loss': 0., 't_recon_loss': 0., 'dist_loss': 0.}
 
     # clip dataloader
     if CONFIG.limit is None:
-        limit = len(dataloader) - len(dataloader) % CONFIG.n_critic
+        limit = len(dataloader) - len(dataloader) % CONFIG.n_critic #n_critic=2
     else:
         limit = CONFIG.limit
 
     # progressive learning and fade in skip connection to avoid lazy model
-    fadein_weights = [0.0 for _ in range(CONFIG.level)]
+    # 避免懒惰模式，渐进式学习
+    fadein_weights_final = [0.0, 0.0, 1.0, 1.0]
+    fadein_weights = [0.0 for _ in range(CONFIG.level)] #4 [0.0, 0.0, 0.0, 0.0]
     if epoch > 200:
-        fadein_weights[-1] += min((epoch - 200) / (400 - 200), 1.0)
+        fadein_weights[-1] += min((epoch - 200) / (400 - 200), 1.0)#最后一位累积，
+        print(f'Epoch {epoch}, fadein weights:{fadein_weights}>>fwf:{fadein_weights_final}')
     if epoch > 400:
-        fadein_weights[-2] += min((epoch - 400) / (600 - 400), 1.0)
-    fadein_weights = [0.0, 0.0, 1.0, 1.0]
-    print(f'Epoch {epoch}, fadein weights {fadein_weights}')
+        fadein_weights[-2] += min((epoch - 400) / (600 - 400), 1.0)#倒数第二位累积
+        print(f'Epoch {epoch}, fadein weights:{fadein_weights}>>fwf:{fadein_weights_final}')
+
+
+    # fadein_weights = [0.0, 0.0, 1.0, 1.0]
+    # print(f'Epoch {epoch}, fadein weights {fadein_weights}')
 
     for i, (img, label) in enumerate(tqdm(dataloader, disable=CONFIG.disable_tqdm)):
         if i > limit:
             break
         batches_done += 1
-        iter_start = time.time()
+        iter_start = time.time()# 返回当前时间
 
         img = img.to(CONFIG.device)
         label = label.to(CONFIG.device)
 
-        opt_d.zero_grad()
-        out = model(img, fadein_weights=fadein_weights)
+        opt_d.zero_grad()# Adam
+        out = model(img, fadein_weights=fadein_weights)# Generation img
 
         ae_time =time.time()
 
@@ -243,26 +258,26 @@ def gan_train(dataloader, epoch, writer):
         summary_grads(discriminator, 'discriminator', writer, epoch)
         opt_d.step()
 
-        tot_loss['d_loss'] += d_loss.item()
+        tot_loss['d_loss'] += d_loss.item()#利用item()把单元素的tensor转成标量，再加到loss上
 
         disc_bw_time = time.time()
 
-        # train generator at every n_critic step only
+        # train generator at every n_critic=2 step only
         if i % CONFIG.n_critic == 0:
 
             # out = model(img)
 
             if CONFIG.alert is not None:
-                CONFIG.alert.record(out['recon'].detach(), img)
+                CONFIG.alert.record(out['recon'].detach(), img)#感觉可以delz
 
             # reconstruction loss
-            recon_loss = CONFIG.recon_w * recon_criterion(out["recon"], img)
-            tot_loss['recon_loss'] += recon_loss.item()
+            recon_loss = CONFIG.recon_w * recon_criterion(out["recon"], img)# 做recon和img两个之间的mse
+            tot_loss['recon_loss'] += recon_loss.item()#利用item()把单元素的tensor转成标量，再加到loss上
             loss_all = recon_loss
 
             # generator loss
             fake_validity = discriminator(out["recon"])
-            g_loss = CONFIG.g_w * ce(fake_validity, torch.ones_like(fake_validity))
+            g_loss = CONFIG.g_w * ce(fake_validity, torch.ones_like(fake_validity))#BCEWithLogitsLoss*0.005
             tot_loss['g_loss'] += g_loss.item()
             loss_all = loss_all + g_loss
 
@@ -295,7 +310,7 @@ def gan_train(dataloader, epoch, writer):
 
             del loss_all, recon_loss, g_loss, fake_validity
             if CONFIG.dist:
-                del t_recon_loss, dist_loss
+                del t_recon_loss, dist_loss# 删除
 
             # print('AE time {:.4f}, disc time {:.4f}, disc bw time {:.4f}, loss time {:.4f}, bw time {:.4f}'.format(
             #     ae_time - iter_start, disc_time - ae_time, disc_bw_time - disc_time, loss_time - disc_time, bw_time - loss_time
